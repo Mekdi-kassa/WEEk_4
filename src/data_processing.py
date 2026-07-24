@@ -12,6 +12,7 @@ from pathlib import Path
 import joblib
 import pandas as pd
 from sklearn.base import BaseEstimator, TransformerMixin
+from sklearn.cluster import KMeans
 from sklearn.compose import ColumnTransformer
 from sklearn.impute import SimpleImputer
 from sklearn.pipeline import Pipeline
@@ -155,6 +156,59 @@ class ProcessedOutput:
     pipeline: Pipeline
 
 
+def _build_rfm_table(raw_df: pd.DataFrame) -> pd.DataFrame:
+    """Create customer-level RFM table from raw transactions."""
+    df = raw_df.copy()
+    df["TransactionStartTime"] = pd.to_datetime(
+        df["TransactionStartTime"], errors="coerce", utc=True
+    )
+    df = df.dropna(subset=["CustomerId", "TransactionStartTime"])
+
+    snapshot_date = df["TransactionStartTime"].max() + pd.Timedelta(days=1)
+
+    rfm = (
+        df.groupby("CustomerId", as_index=False)
+        .agg(
+            last_txn_time=("TransactionStartTime", "max"),
+            frequency=("TransactionId", "count"),
+            monetary=("Value", "sum"),
+        )
+        .copy()
+    )
+    rfm["recency"] = (
+        (snapshot_date - rfm["last_txn_time"]).dt.total_seconds() / 86400.0
+    )
+    return rfm[["CustomerId", "recency", "frequency", "monetary"]]
+
+
+def build_rfm_high_risk_labels(
+    raw_df: pd.DataFrame, n_clusters: int = 3, random_state: int = 42
+) -> pd.DataFrame:
+    """Cluster customers by RFM and return proxy label is_high_risk."""
+    rfm = _build_rfm_table(raw_df)
+    scaler = StandardScaler()
+    scaled_rfm = scaler.fit_transform(rfm[["recency", "frequency", "monetary"]])
+
+    kmeans = KMeans(n_clusters=n_clusters, random_state=random_state, n_init=20)
+    rfm["rfm_cluster"] = kmeans.fit_predict(scaled_rfm)
+
+    profile = (
+        rfm.groupby("rfm_cluster")[["recency", "frequency", "monetary"]]
+        .mean()
+        .reset_index()
+    )
+
+    # High risk = least engaged cluster: high recency, low frequency, low monetary.
+    profile["risk_score"] = (
+        profile["recency"] - profile["frequency"] - profile["monetary"]
+    )
+    high_risk_cluster = int(profile.loc[profile["risk_score"].idxmax(), "rfm_cluster"])
+
+    labels = rfm[["CustomerId", "rfm_cluster"]].copy()
+    labels["is_high_risk"] = (labels["rfm_cluster"] == high_risk_cluster).astype(int)
+    return labels[["CustomerId", "is_high_risk"]]
+
+
 def build_pipeline() -> Pipeline:
     """Create the single sklearn Pipeline object used for feature processing."""
     preprocessor = ColumnTransformer(
@@ -194,8 +248,12 @@ def build_pipeline() -> Pipeline:
     )
 
 
-def fit_transform_to_dataframe(raw_df: pd.DataFrame) -> ProcessedOutput:
-    """Fit the processing pipeline and return a model-ready DataFrame."""
+def fit_transform_to_dataframe(
+    raw_df: pd.DataFrame,
+    include_target: bool = False,
+    random_state: int = 42,
+) -> ProcessedOutput:
+    """Fit pipeline and return customer-level model-ready feature DataFrame."""
     pipeline = build_pipeline()
     matrix = pipeline.fit_transform(raw_df)
 
@@ -205,6 +263,14 @@ def fit_transform_to_dataframe(raw_df: pd.DataFrame) -> ProcessedOutput:
 
     transformed_df = pd.DataFrame(matrix, columns=transformed_columns)
     transformed_df.insert(0, "CustomerId", customer_features_df["CustomerId"].values)
+
+    if include_target:
+        target_df = build_rfm_high_risk_labels(
+            raw_df=raw_df, n_clusters=3, random_state=random_state
+        )
+        transformed_df = transformed_df.merge(target_df, on="CustomerId", how="left")
+        transformed_df["is_high_risk"] = transformed_df["is_high_risk"].fillna(0).astype(int)
+
     return ProcessedOutput(features=transformed_df, pipeline=pipeline)
 
 
@@ -212,10 +278,16 @@ def process_raw_file(
     input_path: str,
     output_path: str,
     pipeline_path: str = "models/data_processing_pipeline.joblib",
+    include_target: bool = True,
+    random_state: int = 42,
 ) -> ProcessedOutput:
     """Load raw CSV, fit pipeline, and persist processed features + pipeline."""
     raw_df = pd.read_csv(input_path)
-    result = fit_transform_to_dataframe(raw_df)
+    result = fit_transform_to_dataframe(
+        raw_df=raw_df,
+        include_target=include_target,
+        random_state=random_state,
+    )
 
     output_file = Path(output_path)
     output_file.parent.mkdir(parents=True, exist_ok=True)
@@ -232,7 +304,12 @@ def main() -> None:
     """Run processing with the default repository paths."""
     input_path = "data/raw/data.csv"
     output_path = "data/processed/model_features.csv"
-    process_raw_file(input_path=input_path, output_path=output_path)
+    process_raw_file(
+        input_path=input_path,
+        output_path=output_path,
+        include_target=True,
+        random_state=42,
+    )
     print(f"Processed features written to {output_path}")
 
 
