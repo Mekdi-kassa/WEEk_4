@@ -1,8 +1,10 @@
-version: "3.9"
 services:
   credit-risk-api:
     build: .
     container_name: credit-risk-api
+    restart: unless-stopped
     ports:
       - "8000:8000"
+    environment:
+      - MLFLOW_MODEL_URI=${MLFLOW_MODEL_URI:-}
     command: uvicorn src.api.main:app --host 0.0.0.0 --port 8000
