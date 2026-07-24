@@ -98,7 +98,7 @@ class CustomerFeatureBuilder(BaseEstimator, TransformerMixin):
         df["txn_dayofweek"] = df["TransactionStartTime"].dt.dayofweek
         df["is_weekend"] = (df["txn_dayofweek"] >= 5).astype(int)
 
-        snapshot_date = df["TransactionStartTime"].max() + pd.Timedelta(days=1)
+        snapshot_date = df["TransactionStartTime"].max() + pd.offsets.Day(1)
 
         grouped = df.groupby("CustomerId", as_index=False)
         base = grouped.agg(
@@ -164,7 +164,7 @@ def _build_rfm_table(raw_df: pd.DataFrame) -> pd.DataFrame:
     )
     df = df.dropna(subset=["CustomerId", "TransactionStartTime"])
 
-    snapshot_date = df["TransactionStartTime"].max() + pd.Timedelta(days=1)
+    snapshot_date = df["TransactionStartTime"].max() + pd.offsets.Day(1)
 
     rfm = (
         df.groupby("CustomerId", as_index=False)
